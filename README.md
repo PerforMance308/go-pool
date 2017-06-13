@@ -59,3 +59,15 @@ func (s *session) Insert(q query) error {
   Use go_pool.Transaction/2 to call your function and Each call to a function requires a callback method.Transaction requires 2          parameters, first one is callback method name, the second one is callback method arguments.
   
   You can use this pool on redis,mysql and any other database. And it can also be used as an object pool.
+
+# Contributing
+
+    1.Fork it
+  
+    2.Create your feature branch (git checkout -b my-new-feature)
+  
+    3.Commit your changes (git commit -am 'Add some feature')
+  
+    4.Push to the branch (git push origin my-new-feature)
+  
+    5.Create new Pull Request
