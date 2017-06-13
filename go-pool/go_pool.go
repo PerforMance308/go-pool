@@ -1,14 +1,14 @@
 package go_pool
 
 import (
-	"server/tree/rbtree"
 	"sync"
 	"reflect"
 	"time"
-	"github.com/pkg/errors"
+	"errors"
+	"container/list"
 )
 
-const defaultTimeout = 5
+const defaultTimeout = 20
 
 type PoolArgs struct {
 	Size     int
@@ -19,16 +19,10 @@ type StartPool func() (interface{}, error)
 
 type pools struct {
 	PoolArgs
-	pool     []*poolInfo
-	use      *rbtree.Tree
-	idle     []*poolInfo
+	pool     []interface{}
+	idle     *list.List
 	mu       sync.RWMutex
 	initFunc StartPool
-}
-
-type poolInfo struct {
-	id   interface{}
-	pool interface{}
 }
 
 var _pools *pools
@@ -44,9 +38,8 @@ func Start(poolArgs PoolArgs, startFunc StartPool) error {
 
 	pools.mu = mu
 	pools.PoolArgs = poolArgs
-	pools.use = rbtree.NewWithIntComparator()
-	pools.idle = make([]*poolInfo, 0)
-	pools.pool = make([]*poolInfo, 0)
+	pools.idle = list.New()
+	pools.pool = make([]interface{}, 0)
 	pools.initFunc = startFunc
 	if pools.TimeOut == 0 {
 		pools.TimeOut = defaultTimeout
@@ -70,12 +63,16 @@ func (pools *pools) transaction(funcName string, args interface{}) (interface{},
 	pool := pools.CheckOut()
 	defer pools.CheckIn(pool)
 
-	method, found := reflect.TypeOf(pool.pool).MethodByName(funcName)
+	if pool == nil {
+		return nil, errors.New("cant find pool")
+	}
+
+	method, found := reflect.TypeOf(pool).MethodByName(funcName)
 	if !found {
 		return nil, errors.New("cant find method")
 	}
 
-	res := method.Func.Call([]reflect.Value{reflect.ValueOf(pool.pool), reflect.ValueOf(args).Elem()})
+	res := method.Func.Call([]reflect.Value{reflect.ValueOf(pool), reflect.ValueOf(args).Elem()})
 
 	if len(res) == 1 {
 		err := res[0].Interface()
@@ -95,37 +92,37 @@ func (pools *pools) transaction(funcName string, args interface{}) (interface{},
 	return nil, errors.New("transaction too many return value")
 }
 
-func (pools *pools) CheckOut() poolInfo {
-	ch := make(chan poolInfo)
+func (pools *pools) CheckOut() interface{} {
+	ch := make(chan interface{})
 	timeOutChan := make(chan bool)
 
 	go pools.checkout(ch, timeOutChan)
 
 	select {
-	case poolInfo := <-ch:
-		return poolInfo
+	case pool := <-ch:
+		return pool
 	case <-timeOutChan:
-		return poolInfo{}
+		return nil
 	}
 }
 
-func (pools *pools) checkout(ch chan poolInfo, timeOutChan chan bool) {
+func (pools *pools) checkout(ch chan interface{}, timeOutChan chan bool) {
 	pools.mu.Lock()
-	if len(pools.idle) > 0 {
-		pool := pools.idle[0]
-		pools.idle = pools.idle[1:]
-		pools.use.Put(pool.id, pool.pool)
+	if pools.idle.Len() > 0 {
+		poolElement := pools.idle.Front()
+		pools.idle.Remove(poolElement)
+		pool := poolElement.Value
 
-		ch <- *pool
+		ch <- pool
 		pools.mu.Unlock()
 	} else {
 		if len(pools.pool) < pools.Size {
 			pools.newPool()
-			pool := pools.idle[0]
-			pools.idle = pools.idle[1:]
-			pools.use.Put(pool.id, pool.pool)
+			poolElement := pools.idle.Front()
+			pools.idle.Remove(poolElement)
+			pool := poolElement.Value
 
-			ch <- *pool
+			ch <- pool
 			pools.mu.Unlock()
 		} else {
 			pools.mu.Unlock()
@@ -136,12 +133,12 @@ func (pools *pools) checkout(ch chan poolInfo, timeOutChan chan bool) {
 					break
 				} else {
 					pools.mu.Lock()
-					if len(pools.idle) > 0 {
-						pool := pools.idle[0]
-						pools.idle = pools.idle[1:]
-						pools.use.Put(pool.id, pool.pool)
+					if pools.idle.Len() > 0 {
+						poolElement := pools.idle.Front()
+						pools.idle.Remove(poolElement)
+						pool := poolElement.Value
 
-						ch <- *pool
+						ch <- pool
 						pools.mu.Unlock()
 						break
 					} else {
@@ -157,12 +154,11 @@ func (pools *pools) checkout(ch chan poolInfo, timeOutChan chan bool) {
 	close(timeOutChan)
 }
 
-func (pools *pools) CheckIn(pInfo poolInfo) {
+func (pools *pools) CheckIn(pool interface{}) {
 	pools.mu.Lock()
 	defer pools.mu.Unlock()
 
-	pools.use.Remove(pInfo.id)
-	pools.idle = append(pools.idle, &pInfo)
+	pools.idle.PushBack(pool)
 }
 
 func (pools *pools) newPool() error {
@@ -174,10 +170,7 @@ func (pools *pools) newPool() error {
 		return err
 	}
 
-	poolId := len(pools.pool) + 1
-	pInfo := &poolInfo{id: poolId, pool: pool}
-	pools.pool = append(pools.pool, pInfo)
-	pools.idle = append(pools.idle, pInfo)
-
+	pools.pool = append(pools.pool, pool)
+	pools.idle.PushBack(pool)
 	return nil
 }
